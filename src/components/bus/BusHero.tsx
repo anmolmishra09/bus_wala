@@ -63,7 +63,7 @@ const BusHero = React.memo(function BusHero() {
           className="text-[10px] sm:text-[11px] uppercase tracking-[0.4em] text-white font-medium"
           style={{ textShadow: '0 1px 14px rgba(10,3,0,0.9)' }}
         >
-          All night on NH 96
+          All night on NH 39
         </p>
         <span
           className="h-[1px] w-12 sm:w-16"
