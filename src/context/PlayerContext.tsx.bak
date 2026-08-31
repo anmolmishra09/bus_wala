@@ -1,0 +1,521 @@
+'use client';
+
+import React, { createContext, useContext, useEffect, useRef, useState, useCallback } from 'react';
+import { Track, Playlist, playlists } from '@/data/playlist';
+
+export interface PlayerState {
+  currentPlaylist: Playlist;
+  currentTrack: Track | null;
+  currentIndex: number;
+  isPlaying: boolean;
+  isLoading: boolean;
+  progress: number; // 0–1
+  duration: number; // seconds
+  currentTime: number; // seconds
+  volume: number; // 0–1
+  isMuted: boolean;
+  isShuffled: boolean;
+  showQueue: boolean;
+  showTicket: boolean;
+  showWhoDriving: boolean;
+}
+
+interface PlayerContextValue extends PlayerState {
+  play: () => void;
+  pause: () => void;
+  togglePlay: () => void;
+  next: () => void;
+  prev: () => void;
+  selectTrack: (track: Track, playlist?: Playlist) => void;
+  seek: (ratio: number) => void;
+  setVolume: (v: number) => void;
+  toggleMute: () => void;
+  toggleShuffle: () => void;
+  setShowQueue: (v: boolean) => void;
+  setShowTicket: (v: boolean) => void;
+  setShowWhoDriving: (v: boolean) => void;
+  switchPlaylist: (playlist: Playlist) => void;
+  playerRef: React.RefObject<HTMLIFrameElement | null>;
+  playHorn: () => void;
+  isHornActive: boolean;
+}
+
+const PlayerContext = createContext<PlayerContextValue | null>(null);
+
+export function usePlayer() {
+  const ctx = useContext(PlayerContext);
+  if (!ctx) throw new Error('usePlayer must be inside PlayerProvider');
+  return ctx;
+}
+
+export function PlayerProvider({ children }: { children: React.ReactNode }) {
+  const [currentPlaylist, setCurrentPlaylist] = useState<Playlist>(playlists[0]);
+  const [currentIndex, setCurrentIndex] = useState(0);
+  const [isPlaying, setIsPlaying] = useState(false);
+  const [isLoading, setIsLoading] = useState(false);
+  const [progress, setProgress] = useState(0);
+  const [duration, setDuration] = useState(0);
+  const [currentTime, setCurrentTime] = useState(0);
+  const [volume, setVolumeState] = useState(0.8);
+  const [isMuted, setIsMuted] = useState(false);
+  const [isShuffled, setIsShuffled] = useState(false);
+  const [showQueue, setShowQueue] = useState(false);
+  const [showTicket, setShowTicket] = useState(false);
+  const [showWhoDriving, setShowWhoDriving] = useState(false);
+
+  const playerRef = useRef<HTMLIFrameElement | null>(null);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const ytPlayerRef = useRef<any>(null);
+  const intervalRef = useRef<NodeJS.Timeout | null>(null);
+  const isReadyRef = useRef(false);
+  const loadingTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+
+  const currentTrack = currentPlaylist.tracks[currentIndex] ?? null;
+
+  // ── Refs that always point to latest state (solves stale closure) ──
+  const handleNextRef = useRef<() => void>(() => {});
+  const handlePrevRef = useRef<() => void>(() => {});
+
+  // ── Load persisted state ──
+  useEffect(() => {
+    try {
+      const savedVol = localStorage.getItem('bd_volume');
+      // eslint-disable-next-line react-hooks/set-state-in-effect
+      if (savedVol) setVolumeState(parseFloat(savedVol));
+      const savedPlaylistId = localStorage.getItem('bd_playlist');
+      const savedTrackIndex = localStorage.getItem('bd_track_index');
+      if (savedPlaylistId) {
+        const pl = playlists.find(p => p.id === savedPlaylistId);
+        // eslint-disable-next-line react-hooks/set-state-in-effect
+        if (pl) setCurrentPlaylist(pl);
+      }
+      // eslint-disable-next-line react-hooks/set-state-in-effect
+      if (savedTrackIndex) setCurrentIndex(parseInt(savedTrackIndex, 10));
+    } catch { /* ignore */ }
+  }, []);
+
+  // ── Persist state changes ──
+  useEffect(() => {
+    try { localStorage.setItem('bd_volume', String(volume)); } catch { /* */ }
+  }, [volume]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem('bd_playlist', currentPlaylist.id);
+      localStorage.setItem('bd_track_index', String(currentIndex));
+    } catch { /* */ }
+  }, [currentPlaylist.id, currentIndex]);
+
+  // ── Progress interval ──
+  const startProgressInterval = useCallback(() => {
+    if (intervalRef.current) clearInterval(intervalRef.current);
+    intervalRef.current = setInterval(() => {
+      if (ytPlayerRef.current && ytPlayerRef.current.getCurrentTime) {
+        const curr = ytPlayerRef.current.getCurrentTime?.() ?? 0;
+        const dur = ytPlayerRef.current.getDuration?.() ?? 0;
+        setCurrentTime(curr);
+        setDuration(dur);
+        setProgress(dur > 0 ? curr / dur : 0);
+      }
+    }, 500);
+  }, []);
+
+  const stopProgressInterval = useCallback(() => {
+    if (intervalRef.current) {
+      clearInterval(intervalRef.current);
+      intervalRef.current = null;
+    }
+  }, []);
+
+  // ── Loading safety timeout (never stuck forever) ──
+  const startLoadingTimeout = useCallback(() => {
+    if (loadingTimeoutRef.current) clearTimeout(loadingTimeoutRef.current);
+    loadingTimeoutRef.current = setTimeout(() => {
+      setIsLoading(false);
+    }, 15000); // 15s max loading
+  }, []);
+
+  const clearLoadingTimeout = useCallback(() => {
+    if (loadingTimeoutRef.current) {
+      clearTimeout(loadingTimeoutRef.current);
+      loadingTimeoutRef.current = null;
+    }
+  }, []);
+
+  // ── Load track ──
+  const loadTrack = useCallback((track: Track, autoPlay = true) => {
+    setIsLoading(true);
+    startLoadingTimeout();
+    setProgress(0);
+    setCurrentTime(0);
+    setDuration(0);
+    if (ytPlayerRef.current && isReadyRef.current) {
+      if (autoPlay) {
+        ytPlayerRef.current.loadVideoById(track.youtubeId);
+      } else {
+        ytPlayerRef.current.cueVideoById(track.youtubeId);
+        // When cueing (not auto-playing), clear loading immediately
+        setTimeout(() => { setIsLoading(false); clearLoadingTimeout(); }, 500);
+      }
+    }
+  }, [startLoadingTimeout, clearLoadingTimeout]);
+
+  // ── Play / Pause ──
+  const play = useCallback(() => {
+    if (ytPlayerRef.current && isReadyRef.current) {
+      ytPlayerRef.current.playVideo();
+    }
+    setIsPlaying(true);
+  }, []);
+
+  const pause = useCallback(() => {
+    if (ytPlayerRef.current && isReadyRef.current) {
+      ytPlayerRef.current.pauseVideo();
+    }
+    setIsPlaying(false);
+  }, []);
+
+  const togglePlay = useCallback(() => {
+    if (isPlaying) pause();
+    else play();
+  }, [isPlaying, pause, play]);
+
+  // ── Next / Prev (uses refs for latest playlist state) ──
+  const handleNext = useCallback(() => {
+    handleNextRef.current();
+  }, []);
+
+  const handlePrev = useCallback(() => {
+    handlePrevRef.current();
+  }, []);
+
+  // Keep refs in sync with latest state
+  useEffect(() => {
+    handleNextRef.current = () => {
+      const tracks = currentPlaylist.tracks;
+      if (tracks.length === 0) return;
+      const nextIndex = isShuffled
+        ? Math.floor(Math.random() * tracks.length)
+        : (currentIndex + 1) % tracks.length;
+      setCurrentIndex(nextIndex);
+      loadTrack(tracks[nextIndex]);
+    };
+  }, [currentIndex, currentPlaylist, isShuffled, loadTrack]);
+
+  useEffect(() => {
+    handlePrevRef.current = () => {
+      const tracks = currentPlaylist.tracks;
+      if (tracks.length === 0) return;
+      const prevIndex = currentIndex === 0 ? tracks.length - 1 : currentIndex - 1;
+      setCurrentIndex(prevIndex);
+      loadTrack(tracks[prevIndex]);
+    };
+  }, [currentIndex, currentPlaylist, loadTrack]);
+
+  // ── YouTube Player API setup ──
+  useEffect(() => {
+    const onYTReady = () => {
+      if (!playerRef.current) return;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      ytPlayerRef.current = new (window as any).YT.Player(playerRef.current, {
+        playerVars: {
+          autoplay: 1,
+          controls: 0,
+          disablekb: 1,
+          rel: 0,
+          fs: 0,
+          playsinline: 1,
+        },
+        events: {
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          onReady: (e: any) => {
+            isReadyRef.current = true;
+            e.target.setVolume(Math.round(volume * 100));
+          },
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          onStateChange: (e: any) => {
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            const YT = (window as any).YT.PlayerState;
+            if (e.data === YT.PLAYING) {
+              setIsPlaying(true);
+              setIsLoading(false);
+              clearLoadingTimeout();
+              startProgressInterval();
+            } else if (e.data === YT.PAUSED) {
+              setIsPlaying(false);
+              stopProgressInterval();
+            } else if (e.data === YT.ENDED) {
+              setIsPlaying(false);
+              setIsLoading(false);
+              clearLoadingTimeout();
+              stopProgressInterval();
+              // Use ref so we always call the LATEST handleNext
+              setTimeout(() => handleNextRef.current(), 200);
+            } else if (e.data === YT.BUFFERING) {
+              setIsLoading(true);
+              startLoadingTimeout();
+            } else if (e.data === -1) {
+              // UNSTARTED — video is loaded but hasn't played (often due to autoplay policies).
+              // We wait briefly, and if it hasn't started playing, we clear the loading state
+              // so the user can manually click Play. We DO NOT skip.
+              setTimeout(() => {
+                if (ytPlayerRef.current && ytPlayerRef.current.getPlayerState() === -1) {
+                  setIsLoading(false);
+                  clearLoadingTimeout();
+                  setIsPlaying(false);
+                }
+              }, 1500);
+            }
+          },
+          onError: () => {
+            setIsLoading(false);
+            clearLoadingTimeout();
+            // Skip broken videos automatically
+            setTimeout(() => handleNextRef.current(), 500);
+          },
+        },
+      });
+    };
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    if ((window as any).YT && (window as any).YT.Player) {
+      onYTReady();
+    } else {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (window as any).onYouTubeIframeAPIReady = onYTReady;
+    }
+
+    return () => {
+      stopProgressInterval();
+      clearLoadingTimeout();
+    };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // ── Select track ──
+  const selectTrack = useCallback((track: Track, playlist?: Playlist) => {
+    if (playlist && playlist.id !== currentPlaylist.id) {
+      setCurrentPlaylist(playlist);
+      const idx = playlist.tracks.findIndex(t => t.id === track.id);
+      setCurrentIndex(idx >= 0 ? idx : 0);
+      loadTrack(track);
+    } else {
+      const idx = currentPlaylist.tracks.findIndex(t => t.id === track.id);
+      setCurrentIndex(idx >= 0 ? idx : 0);
+      loadTrack(track);
+    }
+  }, [currentPlaylist, loadTrack]);
+
+  // ── Seek ──
+  const seek = useCallback((ratio: number) => {
+    if (ytPlayerRef.current && isReadyRef.current && duration > 0) {
+      ytPlayerRef.current.seekTo(ratio * duration, true);
+      setProgress(ratio);
+      setCurrentTime(ratio * duration);
+    }
+  }, [duration]);
+
+  // ── Volume ──
+  const setVolume = useCallback((v: number) => {
+    setVolumeState(v);
+    if (ytPlayerRef.current && isReadyRef.current) {
+      ytPlayerRef.current.setVolume(Math.round(v * 100));
+      if (v > 0) setIsMuted(false);
+    }
+  }, []);
+
+  const toggleMute = useCallback(() => {
+    setIsMuted(prev => {
+      const next = !prev;
+      if (ytPlayerRef.current && isReadyRef.current) {
+        if (next) ytPlayerRef.current.mute();
+        else ytPlayerRef.current.unMute();
+      }
+      return next;
+    });
+  }, []);
+
+  // ── Shuffle ──
+  const toggleShuffle = useCallback(() => {
+    setIsShuffled(prev => !prev);
+  }, []);
+
+  // ── Switch playlist ──
+  const switchPlaylist = useCallback((playlist: Playlist) => {
+    setCurrentPlaylist(playlist);
+    setCurrentIndex(0);
+    setIsPlaying(false);
+    setProgress(0);
+    setCurrentTime(0);
+    loadTrack(playlist.tracks[0], false);
+  }, [loadTrack]);
+
+  // ── Horn ──
+  const [isHornActive, setIsHornActive] = useState(false);
+  const hornAudiosRef = useRef<HTMLAudioElement[]>([]);
+
+  useEffect(() => {
+    if (typeof Audio !== 'undefined') {
+      const hornFiles = [
+        '/horn/horn-rajasthani.mp3',
+        '/horn/horn-air.mp3',
+        '/horn/horn-truck-1.mp3',
+        '/horn/horn-truck-2.mp3',
+        '/horn/horn-truck-3.mp3',
+        '/horn/horn-truck-4.mp3',
+        '/horn/horn-truck-5.mp3',
+      ];
+      hornAudiosRef.current = hornFiles.map((src) => {
+        const audio = new Audio(src);
+        audio.volume = 0.6;
+        return audio;
+      });
+    }
+  }, []);
+
+  const playHorn = useCallback(() => {
+    if (hornAudiosRef.current.length === 0 || isHornActive) return;
+    setIsHornActive(true);
+
+    const originalVol = Math.round(volume * 100);
+    const duckedVol = Math.round(originalVol * 0.2);
+    const steps = 15;
+    const fadeDuration = 300;
+    const stepTime = fadeDuration / steps;
+
+    try {
+      // Smoothly duck the background music
+      if (isReadyRef.current && ytPlayerRef.current && !isMuted) {
+        let currentStep = 0;
+        const fadeOutInterval = setInterval(() => {
+          currentStep++;
+          try {
+            if (!ytPlayerRef.current) {
+              clearInterval(fadeOutInterval);
+              return;
+            }
+            if (currentStep >= steps) {
+              clearInterval(fadeOutInterval);
+              ytPlayerRef.current.setVolume(duckedVol);
+            } else {
+              const v = originalVol - ((originalVol - duckedVol) * (currentStep / steps));
+              ytPlayerRef.current.setVolume(Math.round(v));
+            }
+          } catch (e) {
+            clearInterval(fadeOutInterval);
+          }
+        }, stepTime);
+      }
+
+      const randomIndex = Math.floor(Math.random() * hornAudiosRef.current.length);
+      const audio = hornAudiosRef.current[randomIndex];
+
+      try {
+        audio.currentTime = 0;
+      } catch (e) {
+        // Ignore if media is not ready
+      }
+      
+      audio.play().catch((e) => {
+        console.warn('Horn audio play failed:', e);
+      });
+      
+      const durationMs = (audio.duration && !isNaN(audio.duration)) ? audio.duration * 1000 : 1500;
+      
+      setTimeout(() => {
+        setIsHornActive(false);
+        // Smoothly restore background music volume
+        if (isReadyRef.current && ytPlayerRef.current && !isMuted) {
+          let currentStep = 0;
+          const fadeInInterval = setInterval(() => {
+            currentStep++;
+            try {
+              if (!ytPlayerRef.current) {
+                clearInterval(fadeInInterval);
+                return;
+              }
+              if (currentStep >= steps) {
+                clearInterval(fadeInInterval);
+                ytPlayerRef.current.setVolume(originalVol);
+              } else {
+                const v = duckedVol + ((originalVol - duckedVol) * (currentStep / steps));
+                ytPlayerRef.current.setVolume(Math.round(v));
+              }
+            } catch (e) {
+              clearInterval(fadeInInterval);
+            }
+          }, stepTime);
+        }
+      }, durationMs + 100);
+    } catch (err) {
+      console.error('Error in playHorn:', err);
+      setIsHornActive(false);
+    }
+  }, [isHornActive, isMuted, volume]);
+
+  // ── Keyboard shortcuts ──
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      const tag = (e.target as HTMLElement)?.tagName;
+      if (tag === 'INPUT' || tag === 'TEXTAREA') return;
+      switch (e.code) {
+        case 'Space': e.preventDefault(); togglePlay(); break;
+        case 'ArrowRight': seek(Math.min(1, progress + 0.02)); break;
+        case 'ArrowLeft': seek(Math.max(0, progress - 0.02)); break;
+        case 'KeyN': handleNext(); break;
+        case 'KeyP': handlePrev(); break;
+        case 'KeyM': toggleMute(); break;
+        case 'KeyQ': setShowQueue(prev => !prev); break;
+        case 'KeyT': setShowTicket(prev => !prev); break;
+        case 'KeyH': playHorn(); break;
+        case 'Escape':
+          setShowQueue(false);
+          setShowTicket(false);
+          setShowWhoDriving(false);
+          break;
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [togglePlay, handleNext, handlePrev, toggleMute, seek, progress, playHorn]);
+
+  const value: PlayerContextValue = {
+    currentPlaylist,
+    currentTrack,
+    currentIndex,
+    isPlaying,
+    isLoading,
+    progress,
+    duration,
+    currentTime,
+    volume,
+    isMuted,
+    isShuffled,
+    showQueue,
+    showTicket,
+    showWhoDriving,
+    playHorn,
+    isHornActive,
+    play,
+    pause,
+    togglePlay,
+    next: handleNext,
+    prev: handlePrev,
+    selectTrack,
+    seek,
+    setVolume,
+    toggleMute,
+    toggleShuffle,
+    setShowQueue,
+    setShowTicket,
+    setShowWhoDriving,
+    switchPlaylist,
+    playerRef,
+  };
+
+  return (
+    <PlayerContext.Provider value={value}>
+      {children}
+    </PlayerContext.Provider>
+  );
+}
