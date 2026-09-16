@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useRef, useCallback } from 'react';
+import { useState, useRef, useCallback, useEffect } from 'react';
 import { usePlayer, usePlayerProgress } from '@/context/PlayerContext';
 import { formatTime } from '@/hooks/useUtils';
 import QueuePanel from './QueuePanel';
@@ -8,42 +8,88 @@ import TicketModal from './TicketModal';
 
 export default function BottomPlayer() {
   const {
-    currentTrack, isPlaying, isLoading,
-    volume, isMuted,
-    togglePlay, next, prev, seek, toggleMute,
-    showQueue, setShowQueue, showTicket, setShowTicket,
+    currentTrack,
+    isPlaying,
+    isLoading,
+    volume,
+    isMuted,
+    togglePlay,
+    next,
+    prev,
+    seek,
+    toggleMute,
+    showQueue,
+    setShowQueue,
+    showTicket,
+    setShowTicket,
     playerRef,
   } = usePlayer();
 
   const { progress, currentTime, duration } = usePlayerProgress();
 
   const [isDragging, setIsDragging] = useState(false);
+  const [dragProgress, setDragProgress] = useState(0);
   const progressBarRef = useRef<HTMLDivElement>(null);
 
   const getSeekRatio = useCallback((clientX: number): number => {
     if (!progressBarRef.current) return 0;
     const rect = progressBarRef.current.getBoundingClientRect();
+    if (rect.width === 0) return 0;
     return Math.max(0, Math.min(1, (clientX - rect.left) / rect.width));
   }, []);
 
+  // Global mouse event listeners during drag
+  useEffect(() => {
+    if (!isDragging) return;
+
+    const handleWindowMouseMove = (e: MouseEvent) => {
+      setDragProgress(getSeekRatio(e.clientX));
+    };
+
+    const handleWindowMouseUp = (e: MouseEvent) => {
+      const finalRatio = getSeekRatio(e.clientX);
+      seek(finalRatio);
+      setIsDragging(false);
+    };
+
+    window.addEventListener('mousemove', handleWindowMouseMove);
+    window.addEventListener('mouseup', handleWindowMouseUp);
+
+    return () => {
+      window.removeEventListener('mousemove', handleWindowMouseMove);
+      window.removeEventListener('mouseup', handleWindowMouseUp);
+    };
+  }, [isDragging, getSeekRatio, seek]);
+
   const handleMouseDown = (e: React.MouseEvent) => {
+    const ratio = getSeekRatio(e.clientX);
     setIsDragging(true);
-    seek(getSeekRatio(e.clientX));
+    setDragProgress(ratio);
   };
 
-  const handleMouseMove = (e: React.MouseEvent) => {
-    if (isDragging) seek(getSeekRatio(e.clientX));
+  const handleTouchStart = (e: React.TouchEvent) => {
+    const ratio = getSeekRatio(e.touches[0].clientX);
+    setIsDragging(true);
+    setDragProgress(ratio);
   };
-
-  const handleMouseUp = () => setIsDragging(false);
 
   const handleTouchMove = (e: React.TouchEvent) => {
-    seek(getSeekRatio(e.touches[0].clientX));
+    if (!isDragging) return;
+    setDragProgress(getSeekRatio(e.touches[0].clientX));
   };
 
-  const initialTrackId = useRef(currentTrack?.youtubeId);
+  const handleTouchEnd = () => {
+    if (isDragging) {
+      seek(dragProgress);
+      setIsDragging(false);
+    }
+  };
 
   if (!currentTrack) return null;
+
+  // Render drag value during active scrubbing, otherwise actual player progress
+  const displayProgress = isDragging ? dragProgress : progress;
+  const displayCurrentTime = isDragging ? dragProgress * duration : currentTime;
 
   return (
     <>
@@ -54,7 +100,7 @@ export default function BottomPlayer() {
           id="yt-player"
           title="YouTube Player"
           allow="autoplay; encrypted-media"
-          src={`https://www.youtube.com/embed/${initialTrackId.current}?enablejsapi=1&playsinline=1`}
+          src={`https://www.youtube.com/embed/${currentTrack.youtubeId}?enablejsapi=1&playsinline=1`}
           width="1"
           height="1"
         />
@@ -67,10 +113,12 @@ export default function BottomPlayer() {
       {showTicket && <TicketModal onClose={() => setShowTicket(false)} />}
 
       {/* Player bar */}
-      <div className="fixed inset-x-0 bottom-0 z-20 flex flex-col items-center px-3 sm:px-6" style={{ paddingBottom: 'max(0.75rem, env(safe-area-inset-bottom))' }}>
+      <div
+        className="fixed inset-x-0 bottom-0 z-20 flex flex-col items-center px-3 sm:px-6"
+        style={{ paddingBottom: 'max(0.75rem, env(safe-area-inset-bottom))' }}
+      >
         <div className="w-full max-w-2xl">
           <div className="flex w-full flex-col gap-1 rounded-[28px] border border-white/12 bg-black/50 p-3 shadow-[0_24px_60px_-20px_rgba(10,4,1,0.85)] backdrop-blur-3xl backdrop-saturate-150 transition-all duration-300 hover:border-white/20 sm:flex-row sm:items-center sm:gap-5 sm:rounded-full sm:pr-5">
-
             {/* Track info + seek */}
             <div className="flex min-w-0 items-center gap-3 sm:flex-1 sm:gap-4">
               {/* Spinning album art */}
@@ -79,37 +127,46 @@ export default function BottomPlayer() {
                   alt={currentTrack.title}
                   src={currentTrack.thumbnail}
                   className="size-full rounded-full object-cover ring-1 ring-white/25 transition-transform will-change-transform"
-                  style={{ transform: isPlaying ? 'rotate(var(--spin-angle, 0deg))' : undefined, animation: isPlaying ? 'spin 8s linear infinite' : 'none' }}
-                  onError={(e) => { (e.target as HTMLImageElement).src = '/bus-thumb-fallback.svg'; }}
+                  style={{
+                    animation: isPlaying ? 'spin 8s linear infinite' : 'none',
+                  }}
+                  onError={(e) => {
+                    (e.target as HTMLImageElement).src = '/bus-thumb-fallback.svg';
+                  }}
                 />
                 <span className="pointer-events-none absolute left-1/2 top-1/2 size-2.5 -translate-x-1/2 -translate-y-1/2 rounded-full bg-black/90 ring-1 ring-white/25" />
               </span>
 
               {/* Title + artist + progress */}
               <div className="min-w-0 flex-1">
-                <div key={currentTrack.id}>
-                  <p className="truncate text-sm font-semibold text-white leading-tight">{currentTrack.title}</p>
-                  <p className="truncate text-xs text-white/50 mt-0.5">{currentTrack.artist}</p>
+                <div>
+                  <p className="truncate text-sm font-semibold text-white leading-tight">
+                    {currentTrack.title}
+                  </p>
+                  <p className="truncate text-xs text-white/50 mt-0.5">
+                    {currentTrack.artist}
+                  </p>
                 </div>
 
                 {/* Seek bar */}
                 <div className="mt-2.5 flex items-center gap-2">
-                  <span className="w-8 shrink-0 text-right text-[10px] tabular-nums text-white/40">{formatTime(currentTime)}</span>
+                  <span className="w-8 shrink-0 text-right text-[10px] tabular-nums text-white/40">
+                    {formatTime(displayCurrentTime)}
+                  </span>
                   <div
-                    className="group relative flex-1 -my-2 cursor-pointer touch-none py-2"
+                    className="group relative flex-1 -my-2 cursor-pointer touch-none py-2 select-none"
                     ref={progressBarRef}
                     role="slider"
                     tabIndex={0}
                     aria-label="Seek"
                     aria-valuemin={0}
                     aria-valuemax={100}
-                    aria-valuenow={Math.round(progress * 100)}
+                    aria-valuenow={Math.round(displayProgress * 100)}
                     onMouseDown={handleMouseDown}
-                    onMouseMove={handleMouseMove}
-                    onMouseUp={handleMouseUp}
-                    onMouseLeave={handleMouseUp}
-                    onTouchStart={(e) => seek(getSeekRatio(e.touches[0].clientX))}
+                    onTouchStart={handleTouchStart}
                     onTouchMove={handleTouchMove}
+                    onTouchEnd={handleTouchEnd}
+                    onTouchCancel={handleTouchEnd}
                     onKeyDown={(e) => {
                       if (e.key === 'ArrowRight') seek(Math.min(1, progress + 0.02));
                       if (e.key === 'ArrowLeft') seek(Math.max(0, progress - 0.02));
@@ -117,16 +174,20 @@ export default function BottomPlayer() {
                   >
                     <div className="relative w-full overflow-hidden rounded-full bg-white/15 h-0.5 group-hover:h-1 transition-all duration-200">
                       <div
-                        className="h-full rounded-full bg-amber-400 transition-[width] duration-200"
-                        style={{ width: `${progress * 100}%` }}
+                        className="h-full rounded-full bg-amber-400 transition-[width] duration-100"
+                        style={{ width: `${displayProgress * 100}%` }}
                       />
                     </div>
                     <span
-                      className="pointer-events-none absolute top-1/2 size-2.5 -translate-x-1/2 -translate-y-1/2 rounded-full bg-white opacity-0 group-hover:opacity-100 transition-opacity duration-200"
-                      style={{ left: `${progress * 100}%` }}
+                      className={`pointer-events-none absolute top-1/2 size-2.5 -translate-x-1/2 -translate-y-1/2 rounded-full bg-white transition-opacity duration-200 ${
+                        isDragging ? 'opacity-100 scale-110' : 'opacity-0 group-hover:opacity-100'
+                      }`}
+                      style={{ left: `${displayProgress * 100}%` }}
                     />
                   </div>
-                  <span className="w-8 shrink-0 text-[10px] tabular-nums text-white/40">{formatTime(duration)}</span>
+                  <span className="w-8 shrink-0 text-[10px] tabular-nums text-white/40">
+                    {formatTime(duration)}
+                  </span>
                 </div>
               </div>
             </div>
@@ -260,7 +321,12 @@ function ShuffleButton() {
   );
 }
 
-function ControlButton({ onClick, label, active, children }: {
+function ControlButton({
+  onClick,
+  label,
+  active,
+  children,
+}: {
   onClick: () => void;
   label: string;
   active?: boolean;
@@ -293,13 +359,18 @@ function KeyboardShortcuts() {
       ].map((group, i) => (
         <span key={i} className="flex items-center gap-1.5 opacity-60 hover:opacity-100 transition-opacity">
           <span className="flex items-center gap-0.5">
-            {group.slice(0, -1).map(key => (
-              <kbd key={key} className="rounded-sm border border-white/10 bg-white/5 px-1.5 py-0.5 text-[10px] font-medium leading-none text-white/50">
+            {group.slice(0, -1).map((key) => (
+              <kbd
+                key={key}
+                className="rounded-sm border border-white/10 bg-white/5 px-1.5 py-0.5 text-[10px] font-medium leading-none text-white/50"
+              >
                 {key}
               </kbd>
             ))}
           </span>
-          <span className="text-[9px] uppercase tracking-[0.15em] font-medium text-white/40">{group[group.length - 1]}</span>
+          <span className="text-[9px] uppercase tracking-[0.15em] font-medium text-white/40">
+            {group[group.length - 1]}
+          </span>
         </span>
       ))}
     </div>

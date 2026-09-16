@@ -17,14 +17,16 @@ const BusHero = React.memo(function BusHero() {
             'radial-gradient(closest-side, rgba(10,4,1,0.62) 0%, rgba(10,4,1,0.3) 50%, rgba(10,4,1,0) 100%)',
         }}
       />
-
       {/* Track count */}
-      <p
-        className="text-[10px] sm:text-[11px] uppercase tracking-[0.45em] text-white/70 animate-rise font-medium"
-        style={{ animationDelay: '120ms', textShadow: '0 1px 14px rgba(10,3,0,0.9)' }}
-      >
-        {currentPlaylist.tracks.length} tracks · non-stop
-      </p>
+<p className="text-[10px] sm:text-[11px] uppercase tracking-[0.45em] text-white/70 animate-rise font-medium"
+  style={{
+    animationDelay: '120ms',
+    textShadow: '0 1px 14px rgba(10,3,0,0.9)',
+  }}
+>
+  {currentPlaylist.tracks.length} tracks · non-stop
+</p>
+
 
       {/* Main Hindi title with 3D block shadow */}
       <h1

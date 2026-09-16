@@ -60,13 +60,48 @@ export function usePlayerProgress() {
 
 export function PlayerProvider({ children }: { children: React.ReactNode }) {
   // --- Core State ---
-  const [currentPlaylist, setCurrentPlaylist] = useState<Playlist>(playlists[0]);
-  const [currentIndex, setCurrentIndex] = useState(0);
+  const [currentPlaylist, setCurrentPlaylist] = useState<Playlist>(() => {
+    try {
+      const savedId = localStorage.getItem('bd_playlist');
+      if (savedId) {
+        const pl = playlists.find(p => p.id === savedId);
+        if (pl) return pl;
+      }
+    } catch { /* */ }
+    return playlists[0];
+  });
+  const [currentIndex, setCurrentIndex] = useState(() => {
+    try {
+      const savedIndex = localStorage.getItem('bd_track_index');
+      const idx = savedIndex ? parseInt(savedIndex, 10) : 0;
+      // Determine playlist from localStorage (same logic as above)
+      let pl = playlists[0];
+      const savedId = localStorage.getItem('bd_playlist');
+      if (savedId) {
+        const found = playlists.find(p => p.id === savedId);
+        if (found) pl = found;
+      }
+      if (pl.tracks.length > 0) {
+        return Math.max(0, Math.min(idx, pl.tracks.length - 1));
+      }
+      return 0;
+    } catch { /* */ }
+    return 0;
+  });
   const [isPlaying, setIsPlaying] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
-  
+
   // --- UI Toggles ---
-  const [volume, setVolumeState] = useState(0.8);
+  const [volume, setVolumeState] = useState(() => {
+    try {
+      const saved = localStorage.getItem('bd_volume');
+      if (saved) {
+        const vol = parseFloat(saved);
+        return Math.min(1, Math.max(0, vol));
+      }
+    } catch { /* */ }
+    return 0.8;
+  });
   const [isMuted, setIsMuted] = useState(false);
   const [isShuffled, setIsShuffled] = useState(false);
   const [showQueue, setShowQueue] = useState(false);
@@ -93,21 +128,6 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
   // ── Refs that always point to latest state (solves stale closure) ──
   const handleNextRef = useRef<() => void>(() => {});
   const handlePrevRef = useRef<() => void>(() => {});
-
-  // ── Load persisted state ──
-  useEffect(() => {
-    try {
-      const savedVol = localStorage.getItem('bd_volume');
-      if (savedVol) setVolumeState(parseFloat(savedVol));
-      const savedPlaylistId = localStorage.getItem('bd_playlist');
-      const savedTrackIndex = localStorage.getItem('bd_track_index');
-      if (savedPlaylistId) {
-        const pl = playlists.find(p => p.id === savedPlaylistId);
-        if (pl) setCurrentPlaylist(pl);
-      }
-      if (savedTrackIndex) setCurrentIndex(parseInt(savedTrackIndex, 10));
-    } catch { /* ignore */ }
-  }, []);
 
   // ── Persist state changes ──
   useEffect(() => {
@@ -147,33 +167,37 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
   }, [isPlaying]);
 
   // ── Progress Loop (requestAnimationFrame for buttery smoothness) ──
-  const updateProgress = useCallback(() => {
-    if (ytPlayerRef.current && ytPlayerRef.current.getCurrentTime) {
-      const curr = ytPlayerRef.current.getCurrentTime?.() ?? 0;
-      const dur = ytPlayerRef.current.getDuration?.() ?? 0;
-      setProgressState({
-        currentTime: curr,
-        duration: dur,
-        progress: dur > 0 ? curr / dur : 0,
-      });
-      // Update media session position state for OS sync
-      if ('mediaSession' in navigator && dur > 0) {
-        try {
-          navigator.mediaSession.setPositionState({
-            duration: dur,
-            playbackRate: 1,
-            position: curr
-          });
-        } catch { /* ignore */ }
+  const updateProgressRef = useRef(() => {});
+
+  useEffect(() => {
+    updateProgressRef.current = () => {
+      if (ytPlayerRef.current && ytPlayerRef.current.getCurrentTime) {
+        const curr = ytPlayerRef.current.getCurrentTime?.() ?? 0;
+        const dur = ytPlayerRef.current.getDuration?.() ?? 0;
+        setProgressState({
+          currentTime: curr,
+          duration: dur,
+          progress: dur > 0 ? curr / dur : 0,
+        });
+        // Update media session position state for OS sync
+        if ('mediaSession' in navigator && dur > 0) {
+          try {
+            navigator.mediaSession.setPositionState({
+              duration: dur,
+              playbackRate: 1,
+              position: curr
+            });
+          } catch { /* ignore */ }
+        }
       }
-    }
-    requestRef.current = requestAnimationFrame(updateProgress);
-  }, []);
+      requestRef.current = requestAnimationFrame(updateProgressRef.current);
+    };
+  }, []); // Empty deps because we use refs and stable setters
 
   const startProgressInterval = useCallback(() => {
     if (requestRef.current) cancelAnimationFrame(requestRef.current);
-    requestRef.current = requestAnimationFrame(updateProgress);
-  }, [updateProgress]);
+    requestRef.current = requestAnimationFrame(updateProgressRef.current);
+  }, []); // No deps
 
   const stopProgressInterval = useCallback(() => {
     if (requestRef.current) {
@@ -202,7 +226,7 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
     setIsLoading(true);
     startLoadingTimeout();
     setProgressState({ progress: 0, currentTime: 0, duration: 0 });
-    
+
     if (ytPlayerRef.current && isReadyRef.current) {
       if (autoPlay) {
         ytPlayerRef.current.loadVideoById(track.youtubeId);
@@ -405,7 +429,7 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
 
   // ── Horn (Optimized with requestAnimationFrame) ──
   const hornAudiosRef = useRef<HTMLAudioElement[]>([]);
-  const hornFadeAnimationRef = useRef<number | undefined>(undefined);
+  const hornAnimationRef = useRef<number | undefined>(undefined);
 
   useEffect(() => {
     if (typeof Audio !== 'undefined') {
@@ -432,7 +456,7 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
 
     const originalVol = Math.round(volume * 100);
     const duckedVol = Math.round(originalVol * 0.2);
-    const fadeDuration = 300; 
+    const fadeDuration = 300;
 
     // Helper to run rAF animation
     const runFade = (startVol: number, endVol: number, duration: number, onComplete?: () => void) => {
@@ -441,19 +465,19 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
         if (!startTime) startTime = timestamp;
         const progress = Math.min((timestamp - startTime) / duration, 1);
         const currentVol = startVol + (endVol - startVol) * progress;
-        
+
         if (isReadyRef.current && ytPlayerRef.current && !isMuted) {
           try { ytPlayerRef.current.setVolume(Math.round(currentVol)); } catch { /* ignore */ }
         }
 
         if (progress < 1) {
-          hornFadeAnimationRef.current = requestAnimationFrame(animate);
+          hornAnimationRef.current = requestAnimationFrame(animate);
         } else if (onComplete) {
           onComplete();
         }
       };
-      if (hornFadeAnimationRef.current) cancelAnimationFrame(hornFadeAnimationRef.current);
-      hornFadeAnimationRef.current = requestAnimationFrame(animate);
+      if (hornAnimationRef.current) cancelAnimationFrame(hornAnimationRef.current);
+      hornAnimationRef.current = requestAnimationFrame(animate);
     };
 
     // Fade OUT background music
@@ -464,9 +488,9 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
 
     try { audio.currentTime = 0; } catch { /* ignore */ }
     audio.play().catch(e => console.warn('Horn audio play failed:', e));
-    
+
     const hornDuration = (audio.duration && !isNaN(audio.duration)) ? audio.duration * 1000 : 1500;
-    
+
     setTimeout(() => {
       setIsHornActive(false);
       // Fade IN background music

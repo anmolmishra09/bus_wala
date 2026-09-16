@@ -1,6 +1,7 @@
 'use client';
 
 import { useEffect, useRef } from 'react';
+import Image from 'next/image';
 import { usePlayer } from '@/context/PlayerContext';
 
 interface WhosDrivingProps {
@@ -48,9 +49,11 @@ export default function WhosDriving({ onClose }: WhosDrivingProps) {
           <div className="flex items-center gap-3">
             {/* Driver avatar */}
             <div className="relative size-12 shrink-0 overflow-hidden rounded-full ring-2 ring-amber-400/30">
-              <img
-                src="https://avatars.githubusercontent.com/u/160344560?s=400&u=882d8a80f505bbaef263a6478f8c9bacf10b2a72&v=4"
+              <Image
+                src="https://raw.githubusercontent.com/anmolmishra09/detaling/refs/heads/main/driver.png"
                 alt="Driver"
+                width={48}
+                height={48}
                 className="size-full object-cover"
               />
             </div>
